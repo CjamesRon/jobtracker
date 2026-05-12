@@ -39,6 +39,16 @@ def upsert_jobs(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not rows:
         return []
 
+    # De-dupe within the current batch first. Job-board searches such as
+    # Adzuna can return the same job for multiple queries, and Supabase
+    # has a unique constraint on (company, external_id).
+    unique_rows = {}
+    for row in rows:
+        key = (row.get("company", ""), row.get("external_id", ""))
+        if key[0] and key[1] and key not in unique_rows:
+            unique_rows[key] = row
+    rows = list(unique_rows.values())
+
     existing = set()
     companies = list({r["company"] for r in rows})
     for company in companies:

@@ -53,8 +53,8 @@ def main():
                 tags = list(default_cats)
 
             row = {
-                "company": name,
-                "external_id": j["external_id"],
+                "company": (j.get("company") or name),
+                "external_id": str(j["external_id"]),
                 "title": j["title"],
                 "location": j.get("location", ""),
                 "url": j["url"],

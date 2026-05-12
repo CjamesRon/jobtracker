@@ -15,6 +15,7 @@ If an endpoint is unreachable, the fetcher logs and returns [] —
 we never want one bad company to crash the whole poll.
 """
 import logging
+import os
 import requests
 from typing import List, Dict, Any
 
@@ -157,6 +158,74 @@ def fetch_smartrecruiters(slug: str) -> List[Dict[str, Any]]:
     return jobs
 
 
+# ---------- ADZUNA UK ----------
+def fetch_adzuna(query: str, where: str = "United Kingdom", results_per_page: int = 25, pages: int = 1) -> List[Dict[str, Any]]:
+    """
+    Adzuna public jobs API for UK-wide job board searches.
+
+    This is used to catch smaller firms and roles that are not exposed through
+    a clean company ATS endpoint. Credentials are read from environment vars:
+      ADZUNA_APP_ID, ADZUNA_APP_KEY
+    """
+    app_id = os.environ.get("ADZUNA_APP_ID", "").strip()
+    app_key = os.environ.get("ADZUNA_APP_KEY", "").strip()
+
+    if not app_id or not app_key:
+        log.warning("ADZUNA_APP_ID / ADZUNA_APP_KEY not set — skipping Adzuna query: %s", query)
+        return []
+
+    jobs: List[Dict[str, Any]] = []
+    for page in range(1, pages + 1):
+        url = f"https://api.adzuna.com/v1/api/jobs/gb/search/{page}"
+        params = {
+            "app_id": app_id,
+            "app_key": app_key,
+            "results_per_page": results_per_page,
+            "what": query,
+            "where": where,
+            "content-type": "application/json",
+        }
+        try:
+            r = requests.get(url, headers=HEADERS, params=params, timeout=TIMEOUT)
+            if r.status_code != 200:
+                log.warning("ADZUNA %s -> %s %s", query, r.status_code, r.text[:200])
+                break
+            data = r.json()
+        except Exception as e:
+            log.warning("ADZUNA %s failed: %s", query, e)
+            break
+
+        results = data.get("results", []) or []
+        if not results:
+            break
+
+        for j in results:
+            company = ((j.get("company") or {}).get("display_name") or "Unknown Company").strip()
+            location = ((j.get("location") or {}).get("display_name") or "").strip()
+            title = (j.get("title") or "").strip()
+            url = j.get("redirect_url") or j.get("adref") or ""
+            external_id = str(j.get("id") or url or title)
+
+            if not title or not external_id:
+                continue
+
+            desc = j.get("description") or ""
+            jobs.append({
+                "external_id": external_id,
+                "company": company,
+                "title": title,
+                "location": location,
+                "url": url,
+                "description": desc[:4000],
+                "posted_at": j.get("created", ""),
+            })
+
+        if len(results) < results_per_page:
+            break
+
+    return jobs
+
+
 def dispatch(ats_type: str, identifier: dict) -> List[Dict[str, Any]]:
     """Route to the right fetcher."""
     if ats_type == "workday":
@@ -167,5 +236,7 @@ def dispatch(ats_type: str, identifier: dict) -> List[Dict[str, Any]]:
         return fetch_lever(**identifier)
     if ats_type == "smartrecruiters":
         return fetch_smartrecruiters(**identifier)
+    if ats_type == "adzuna":
+        return fetch_adzuna(**identifier)
     log.error("Unknown ATS type: %s", ats_type)
     return []

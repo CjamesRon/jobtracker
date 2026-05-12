@@ -72,6 +72,23 @@ SMARTRECRUITERS = [
 ]
 
 
+# Adzuna UK search queries: (query, where, display_name, default_categories)
+# These catch smaller UK firms and job-board postings that do not have clean ATS APIs.
+# Keep this targeted; broad searches create noise and may use API quota quickly.
+ADZUNA = [
+    ("graduate investment analyst",        "London",          "Adzuna — Graduate Investment Analyst",      ["AM", "PE", "IB"]),
+    ("asset management graduate",          "United Kingdom",  "Adzuna — Asset Management Graduate",        ["AM"]),
+    ("wealth management graduate",         "United Kingdom",  "Adzuna — Wealth Management Graduate",       ["WM"]),
+    ("trainee financial adviser",          "United Kingdom",  "Adzuna — Trainee Financial Adviser",        ["WM"]),
+    ("corporate finance graduate",         "United Kingdom",  "Adzuna — Corporate Finance Graduate",       ["IB", "AUDIT_TAX"]),
+    ("m&a analyst",                        "London",          "Adzuna — M&A Analyst",                      ["IB", "PE"]),
+    ("private equity analyst",             "London",          "Adzuna — Private Equity Analyst",           ["PE"]),
+    ("junior equity analyst",              "London",          "Adzuna — Junior Equity Analyst",            ["AM"]),
+    ("audit graduate",                     "United Kingdom",  "Adzuna — Audit Graduate",                   ["AUDIT_TAX"]),
+    ("tax graduate",                       "United Kingdom",  "Adzuna — Tax Graduate",                     ["AUDIT_TAX"]),
+]
+
+
 def all_companies():
     """Return a flat list of (ats_type, identifier_dict, name, default_cats)."""
     out = []
@@ -83,4 +100,6 @@ def all_companies():
         out.append(("lever", {"slug": slug}, name, cats))
     for slug, name, cats in SMARTRECRUITERS:
         out.append(("smartrecruiters", {"slug": slug}, name, cats))
+    for query, where, name, cats in ADZUNA:
+        out.append(("adzuna", {"query": query, "where": where, "results_per_page": 25, "pages": 1}, name, cats))
     return out
