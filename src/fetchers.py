@@ -60,15 +60,38 @@ def fetch_workday(host: str, tenant: str, site_id: str) -> List[Dict[str, Any]]:
     """
     Workday's public job-search endpoint. Tenant + site_id come from the
     careers page URL. We page through up to 500 jobs (10 pages * 50).
+    
+    IMPORTANT: Workday requires specific headers (Accept-Language, Referer)
+    or it returns 422/400 errors. These headers mimic what the actual
+    careers page sends.
     """
     base = f"https://{tenant}.{host}.myworkdayjobs.com"
     url = f"{base}/wday/cxs/{tenant}/{site_id}/jobs"
+    
+    # Workday-specific headers — required as of 2026
+    workday_headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Accept-Language": "en-US",
+        "Referer": f"{base}/en-US/{site_id}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
 
     jobs = []
     offset = 0
     while offset < 500:
         body = {"appliedFacets": {}, "limit": 50, "offset": offset, "searchText": ""}
-        data = _safe_post(url, body)
+        
+        try:
+            r = requests.post(url, headers=workday_headers, json=body, timeout=TIMEOUT)
+            if r.status_code != 200:
+                log.warning("POST %s -> %s", url, r.status_code)
+                break
+            data = r.json()
+        except Exception as e:
+            log.warning("POST %s failed: %s", url, e)
+            break
+            
         if not data or "jobPostings" not in data:
             break
         postings = data["jobPostings"]
@@ -157,6 +180,126 @@ def fetch_smartrecruiters(slug: str) -> List[Dict[str, Any]]:
     return jobs
 
 
+# ---------- REED.CO.UK API ----------
+def fetch_reed(api_key: str, keywords: str, location: str = "") -> List[Dict[str, Any]]:
+    """
+    Reed.co.uk is the UK's #1 job board with 300,000+ jobs.
+    FREE API with no rate limits.
+    
+    API Docs: https://www.reed.co.uk/developers/Jobseeker
+    Sign up for free API key: https://www.reed.co.uk/developers/Jobseeker
+    
+    The API uses Basic Auth with the API key as username (password empty).
+    """
+    import base64
+    
+    url = "https://www.reed.co.uk/api/1.0/search"
+    params = {
+        "keywords": keywords,
+        "resultsToTake": 100,  # Max per request
+        "resultsToSkip": 0,
+    }
+    
+    if location:
+        params["locationName"] = location
+        params["distanceFromLocation"] = 30  # 30 miles radius
+    
+    # Reed uses Basic Auth with API key as username, empty password
+    auth_string = f"{api_key}:".encode()
+    b64_auth = base64.b64encode(auth_string).decode()
+    
+    headers = {
+        "Authorization": f"Basic {b64_auth}",
+        "User-Agent": "PersonalJobTracker/1.0",
+    }
+    
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+        if r.status_code != 200:
+            log.warning("GET Reed API %s -> %s", url, r.status_code)
+            return []
+        data = r.json()
+    except Exception as e:
+        log.warning("Reed API fetch failed: %s", e)
+        return []
+    
+    results = data.get("results", [])
+    jobs = []
+    
+    for job in results:
+        job_id = job.get("jobId")
+        if not job_id:
+            continue
+            
+        jobs.append({
+            "external_id": f"reed-{job_id}",
+            "title": job.get("jobTitle", ""),
+            "location": job.get("locationName", ""),
+            "url": job.get("jobUrl", f"https://www.reed.co.uk/jobs/{job_id}"),
+            "description": job.get("jobDescription", ""),  # brief description from search
+            "posted_at": "",  # Not in search results, would need details API
+        })
+    
+    log.info("Reed '%s' in '%s': found %d jobs", keywords, location, len(jobs))
+    return jobs
+
+
+# ---------- ADZUNA API ----------
+def fetch_adzuna(app_id: str, app_key: str, what: str, where: str = "UK") -> List[Dict[str, Any]]:
+    """
+    Adzuna job search API - global aggregator with UK focus.
+    FREE API with rate limits (contact Adzuna if you hit limits).
+    
+    API Docs: https://developer.adzuna.com/overview
+    Sign up: https://developer.adzuna.com/signup
+    
+    Adzuna aggregates from multiple job boards, so you may see duplicates
+    with Reed/Indeed, but it also catches jobs they don't have.
+    """
+    url = "https://api.adzuna.com/v1/api/jobs/gb/search/1"  # page 1, UK (gb)
+    params = {
+        "app_id": app_id,
+        "app_key": app_key,
+        "results_per_page": 50,  # Max 50 per request
+        "what": what,  # keywords
+        "where": where,  # location
+        "sort_by": "date",  # newest first
+    }
+    
+    try:
+        r = requests.get(url, params=params, timeout=TIMEOUT)
+        if r.status_code != 200:
+            log.warning("GET Adzuna API %s -> %s", url, r.status_code)
+            return []
+        data = r.json()
+    except Exception as e:
+        log.warning("Adzuna API fetch failed: %s", e)
+        return []
+    
+    results = data.get("results", [])
+    jobs = []
+    
+    for job in results:
+        job_id = job.get("id")
+        if not job_id:
+            continue
+        
+        # Adzuna provides redirect URLs, not direct apply links
+        redirect_url = job.get("redirect_url", "")
+        
+        jobs.append({
+            "external_id": f"adzuna-{job_id}",
+            "title": job.get("title", ""),
+            "location": job.get("location", {}).get("display_name", ""),
+            "url": redirect_url,
+            "description": job.get("description", ""),
+            "posted_at": job.get("created", ""),  # ISO date string
+        })
+    
+    log.info("Adzuna '%s' in '%s': found %d jobs", what, where, len(jobs))
+    return jobs
+
+
 def dispatch(ats_type: str, identifier: dict) -> List[Dict[str, Any]]:
     """Route to the right fetcher."""
     if ats_type == "workday":
@@ -169,6 +312,10 @@ def dispatch(ats_type: str, identifier: dict) -> List[Dict[str, Any]]:
         return fetch_smartrecruiters(**identifier)
     if ats_type == "job_board":
         return fetch_job_board(**identifier)
+    if ats_type == "reed":
+        return fetch_reed(**identifier)
+    if ats_type == "adzuna":
+        return fetch_adzuna(**identifier)
     log.error("Unknown ATS type: %s", ats_type)
     return []
 
