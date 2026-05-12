@@ -1,0 +1,32 @@
+name: poll-jobs
+
+on:
+  schedule:
+    # Every 15 minutes. GitHub cron is UTC.
+    # Note: GitHub may delay scheduled runs under load — typically reliable to ~5 min.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:  # lets you run it manually from the Actions tab
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run poll
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CATEGORIES:  "WM,AM,IB,PE,QUANT,AUDIT_TAX"
+        run: python src/poll.py
