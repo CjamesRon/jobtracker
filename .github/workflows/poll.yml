@@ -2,19 +2,20 @@ name: poll-jobs
 
 on:
   schedule:
-    # Every 15 minutes. GitHub cron is UTC.
-    # Note: GitHub may delay scheduled runs under load — typically reliable to ~5 min.
     - cron: "*/15 * * * *"
-  workflow_dispatch:  # lets you run it manually from the Actions tab
+  workflow_dispatch:
 
 jobs:
   poll:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
@@ -22,11 +23,19 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
+      - name: Check Adzuna env exists
+        env:
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+        run: |
+          if [ -z "$ADZUNA_APP_ID" ]; then echo "ADZUNA_APP_ID missing"; else echo "ADZUNA_APP_ID present"; fi
+          if [ -z "$ADZUNA_APP_KEY" ]; then echo "ADZUNA_APP_KEY missing"; else echo "ADZUNA_APP_KEY present"; fi
+
       - name: Run poll
         env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_CATEGORIES:  "WM,AM,IB,PE,QUANT,AUDIT_TAX"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
         run: python src/poll.py
