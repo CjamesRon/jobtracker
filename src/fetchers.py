@@ -15,7 +15,6 @@ If an endpoint is unreachable, the fetcher logs and returns [] —
 we never want one bad company to crash the whole poll.
 """
 import logging
-import os
 import requests
 from typing import List, Dict, Any
 
@@ -158,74 +157,6 @@ def fetch_smartrecruiters(slug: str) -> List[Dict[str, Any]]:
     return jobs
 
 
-# ---------- ADZUNA UK ----------
-def fetch_adzuna(query: str, where: str = "United Kingdom", results_per_page: int = 25, pages: int = 1) -> List[Dict[str, Any]]:
-    """
-    Adzuna public jobs API for UK-wide job board searches.
-
-    This is used to catch smaller firms and roles that are not exposed through
-    a clean company ATS endpoint. Credentials are read from environment vars:
-      ADZUNA_APP_ID, ADZUNA_APP_KEY
-    """
-    app_id = os.environ.get("ADZUNA_APP_ID", "").strip()
-    app_key = os.environ.get("ADZUNA_APP_KEY", "").strip()
-
-    if not app_id or not app_key:
-        log.warning("ADZUNA_APP_ID / ADZUNA_APP_KEY not set — skipping Adzuna query: %s", query)
-        return []
-
-    jobs: List[Dict[str, Any]] = []
-    for page in range(1, pages + 1):
-        url = f"https://api.adzuna.com/v1/api/jobs/gb/search/{page}"
-        params = {
-            "app_id": app_id,
-            "app_key": app_key,
-            "results_per_page": results_per_page,
-            "what": query,
-            "where": where,
-            "content-type": "application/json",
-        }
-        try:
-            r = requests.get(url, headers=HEADERS, params=params, timeout=TIMEOUT)
-            if r.status_code != 200:
-                log.warning("ADZUNA %s -> %s %s", query, r.status_code, r.text[:200])
-                break
-            data = r.json()
-        except Exception as e:
-            log.warning("ADZUNA %s failed: %s", query, e)
-            break
-
-        results = data.get("results", []) or []
-        if not results:
-            break
-
-        for j in results:
-            company = ((j.get("company") or {}).get("display_name") or "Unknown Company").strip()
-            location = ((j.get("location") or {}).get("display_name") or "").strip()
-            title = (j.get("title") or "").strip()
-            url = j.get("redirect_url") or j.get("adref") or ""
-            external_id = str(j.get("id") or url or title)
-
-            if not title or not external_id:
-                continue
-
-            desc = j.get("description") or ""
-            jobs.append({
-                "external_id": external_id,
-                "company": company,
-                "title": title,
-                "location": location,
-                "url": url,
-                "description": desc[:4000],
-                "posted_at": j.get("created", ""),
-            })
-
-        if len(results) < results_per_page:
-            break
-
-    return jobs
-
-
 def dispatch(ats_type: str, identifier: dict) -> List[Dict[str, Any]]:
     """Route to the right fetcher."""
     if ats_type == "workday":
@@ -236,7 +167,154 @@ def dispatch(ats_type: str, identifier: dict) -> List[Dict[str, Any]]:
         return fetch_lever(**identifier)
     if ats_type == "smartrecruiters":
         return fetch_smartrecruiters(**identifier)
-    if ats_type == "adzuna":
-        return fetch_adzuna(**identifier)
+    if ats_type == "job_board":
+        return fetch_job_board(**identifier)
     log.error("Unknown ATS type: %s", ats_type)
     return []
+
+
+# ---------- JOB BOARDS (UK-specific search scraping) ----------
+def fetch_job_board(board: str, query: str, location: str) -> List[Dict[str, Any]]:
+    """
+    Fetch jobs from UK job boards via their public search pages.
+    
+    This is the grey-area approach: we're reading public search results at
+    the same interval a human would (every 15 minutes), parsing the HTML,
+    and normalizing to our schema. We're NOT bypassing auth, hitting
+    undocumented APIs, or crawling aggressively.
+    
+    Risk: if a board blocks scraping or rate-limits us, this fetcher will
+    fail gracefully and return []. The poll continues for other sources.
+    """
+    if board == "totaljobs":
+        return _fetch_totaljobs(query, location)
+    elif board == "brightnetwork":
+        return _fetch_brightnetwork(query)
+    else:
+        log.warning("Unknown job board: %s", board)
+        return []
+
+
+def _fetch_totaljobs(query: str, location: str) -> List[Dict[str, Any]]:
+    """
+    Totaljobs search page scraping.
+    URL pattern: https://www.totaljobs.com/jobs/{query}/in-{location}
+    
+    We parse the HTML job cards. If the structure changes, this breaks —
+    that's the trade-off with scraping. Check logs if Totaljobs jobs stop
+    appearing.
+    """
+    import re
+    from urllib.parse import quote_plus
+    
+    query_slug = query.replace(" ", "-").lower()
+    location_slug = location.replace(" ", "-").lower() if location else ""
+    
+    if location:
+        url = f"https://www.totaljobs.com/jobs/{query_slug}/in-{location_slug}"
+    else:
+        url = f"https://www.totaljobs.com/jobs/{query_slug}"
+    
+    try:
+        r = requests.get(url, headers={**HEADERS, "User-Agent": "Mozilla/5.0"}, timeout=TIMEOUT)
+        if r.status_code != 200:
+            log.warning("Totaljobs search %s -> %s", url, r.status_code)
+            return []
+    except Exception as e:
+        log.warning("Totaljobs fetch failed: %s", e)
+        return []
+    
+    html = r.text
+    jobs = []
+    
+    # Totaljobs uses structured <article> tags with data attributes.
+    # This is a simplified parser — real HTML parsing would use BeautifulSoup.
+    # For now, regex extraction of job cards.
+    pattern = re.compile(
+        r'<article[^>]*data-job-id="([^"]+)"[^>]*>.*?'
+        r'<h2[^>]*>(.*?)</h2>.*?'
+        r'<a[^>]*href="([^"]+)"[^>]*>.*?'
+        r'<div[^>]*class="[^"]*company[^"]*"[^>]*>(.*?)</div>.*?'
+        r'<span[^>]*class="[^"]*location[^"]*"[^>]*>(.*?)</span>',
+        re.DOTALL | re.IGNORECASE
+    )
+    
+    matches = pattern.findall(html)
+    for job_id, title, href, company, loc in matches:
+        # Clean HTML entities
+        import html as htmllib
+        title = htmllib.unescape(re.sub(r'<[^>]+>', '', title)).strip()
+        company = htmllib.unescape(re.sub(r'<[^>]+>', '', company)).strip()
+        loc = htmllib.unescape(re.sub(r'<[^>]+>', '', loc)).strip()
+        
+        full_url = href if href.startswith("http") else f"https://www.totaljobs.com{href}"
+        
+        jobs.append({
+            "external_id": f"totaljobs-{job_id}",
+            "title": title,
+            "location": loc,
+            "url": full_url,
+            "description": "",  # would require fetching each job page
+            "posted_at": "",
+        })
+    
+    log.info("Totaljobs '%s' in '%s': found %d jobs", query, location, len(jobs))
+    return jobs[:50]  # cap at 50 per search to avoid overwhelming the DB
+
+
+def _fetch_brightnetwork(query: str) -> List[Dict[str, Any]]:
+    """
+    Bright Network graduate jobs scraping.
+    URL: https://www.brightnetwork.co.uk/search/?content_type=jobs&q={query}
+    
+    Bright Network is UK grad-focused so location filter is implicit.
+    """
+    import re
+    from urllib.parse import quote_plus
+    
+    url = f"https://www.brightnetwork.co.uk/search/?content_type=jobs&q={quote_plus(query)}"
+    
+    try:
+        r = requests.get(url, headers={**HEADERS, "User-Agent": "Mozilla/5.0"}, timeout=TIMEOUT)
+        if r.status_code != 200:
+            log.warning("Bright Network search %s -> %s", url, r.status_code)
+            return []
+    except Exception as e:
+        log.warning("Bright Network fetch failed: %s", e)
+        return []
+    
+    html = r.text
+    jobs = []
+    
+    # Bright Network uses a card-based layout. This is a simplified regex parser.
+    # Real implementation would use BeautifulSoup or lxml.
+    pattern = re.compile(
+        r'<div[^>]*class="[^"]*job-card[^"]*"[^>]*>.*?'
+        r'<a[^>]*href="([^"]+)"[^>]*>.*?'
+        r'<h3[^>]*>(.*?)</h3>.*?'
+        r'<span[^>]*class="[^"]*company[^"]*"[^>]*>(.*?)</span>',
+        re.DOTALL | re.IGNORECASE
+    )
+    
+    matches = pattern.findall(html)
+    for href, title, company in matches:
+        import html as htmllib
+        title = htmllib.unescape(re.sub(r'<[^>]+>', '', title)).strip()
+        company = htmllib.unescape(re.sub(r'<[^>]+>', '', company)).strip()
+        
+        full_url = href if href.startswith("http") else f"https://www.brightnetwork.co.uk{href}"
+        
+        # Extract a pseudo-ID from the URL
+        job_id = href.split("/")[-1] if "/" in href else href
+        
+        jobs.append({
+            "external_id": f"brightnetwork-{job_id}",
+            "title": title,
+            "location": "UK (graduate scheme)",
+            "url": full_url,
+            "description": "",
+            "posted_at": "",
+        })
+    
+    log.info("Bright Network '%s': found %d jobs", query, len(jobs))
+    return jobs[:50]

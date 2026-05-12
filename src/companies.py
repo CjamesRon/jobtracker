@@ -71,21 +71,16 @@ SMARTRECRUITERS = [
     # Add as you discover them — many European firms use this
 ]
 
-
-# Adzuna UK search queries: (query, where, display_name, default_categories)
-# These catch smaller UK firms and job-board postings that do not have clean ATS APIs.
-# Keep this targeted; broad searches create noise and may use API quota quickly.
-ADZUNA = [
-    ("graduate investment analyst",        "London",          "Adzuna — Graduate Investment Analyst",      ["AM", "PE", "IB"]),
-    ("asset management graduate",          "United Kingdom",  "Adzuna — Asset Management Graduate",        ["AM"]),
-    ("wealth management graduate",         "United Kingdom",  "Adzuna — Wealth Management Graduate",       ["WM"]),
-    ("trainee financial adviser",          "United Kingdom",  "Adzuna — Trainee Financial Adviser",        ["WM"]),
-    ("corporate finance graduate",         "United Kingdom",  "Adzuna — Corporate Finance Graduate",       ["IB", "AUDIT_TAX"]),
-    ("m&a analyst",                        "London",          "Adzuna — M&A Analyst",                      ["IB", "PE"]),
-    ("private equity analyst",             "London",          "Adzuna — Private Equity Analyst",           ["PE"]),
-    ("junior equity analyst",              "London",          "Adzuna — Junior Equity Analyst",            ["AM"]),
-    ("audit graduate",                     "United Kingdom",  "Adzuna — Audit Graduate",                   ["AUDIT_TAX"]),
-    ("tax graduate",                       "United Kingdom",  "Adzuna — Tax Graduate",                     ["AUDIT_TAX"]),
+# Job Boards (UK-specific, uses search scraping)
+# These are public job boards where many smaller WM/AM firms post.
+# Format: (board_name, search_query, location, default_categories)
+JOB_BOARDS = [
+    ("totaljobs", "wealth management", "London", ["WM"]),
+    ("totaljobs", "asset management", "London", ["AM"]),
+    ("totaljobs", "private banking", "London", ["WM"]),
+    ("brightnetwork", "wealth", "", ["WM"]),  # Bright Network is UK grad-focused already
+    ("brightnetwork", "asset management", "", ["AM"]),
+    ("brightnetwork", "investment banking", "", ["IB"]),
 ]
 
 
@@ -100,6 +95,12 @@ def all_companies():
         out.append(("lever", {"slug": slug}, name, cats))
     for slug, name, cats in SMARTRECRUITERS:
         out.append(("smartrecruiters", {"slug": slug}, name, cats))
-    for query, where, name, cats in ADZUNA:
-        out.append(("adzuna", {"query": query, "where": where, "results_per_page": 25, "pages": 1}, name, cats))
+    
+    # Add job boards
+    for board_name, query, location, cats in JOB_BOARDS:
+        display_name = f"{board_name.title()}: {query}"
+        if location:
+            display_name += f" ({location})"
+        out.append(("job_board", {"board": board_name, "query": query, "location": location}, display_name, cats))
+    
     return out

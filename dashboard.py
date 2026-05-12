@@ -1,15 +1,10 @@
 """
-Premium Streamlit dashboard for the UK Finance Job Tracker.
+Premium Streamlit dashboard for the UK Finance Job Tracker — Multi-page version.
+
+NEW: Dedicated "WM London" page showing EVERY wealth management job in London,
+no matter the firm size, sorted by newest first.
 
 Replace your existing dashboard.py with this file.
-
-Requires existing tables:
-- users
-- jobs
-- applications
-- alert_log
-
-Uses Supabase service_role key server-side via Streamlit secrets/env vars.
 """
 
 import os
@@ -202,6 +197,14 @@ st.markdown(
         color: #475569;
     }
 
+    .page-selector {
+        background: white;
+        border: 1px solid #E2E8F0;
+        border-radius: 16px;
+        padding: 8px;
+        margin-bottom: 16px;
+    }
+
     a {
         text-decoration: none;
     }
@@ -298,57 +301,49 @@ def supabase_get(path, timeout=30):
 
 def supabase_post(path, payload, prefer="return=minimal,resolution=merge-duplicates", timeout=20):
     url = f"{SUPABASE_URL}{path}"
-    headers = {**HEADERS, "Prefer": prefer}
-    r = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    h = {**HEADERS, "Prefer": prefer}
+    r = requests.post(url, headers=h, json=payload, timeout=timeout)
     return r
 
 
 # -----------------------------
 # Auth
 # -----------------------------
-@st.cache_data(ttl=300, show_spinner=False)
 def authenticate(token: str):
-    if not token:
+    if not token or not SUPABASE_URL or not SERVICE_KEY:
         return None
-    token_q = quote(token.strip(), safe="")
-    r = supabase_get(f"/rest/v1/users?user_token=eq.{token_q}&select=*&limit=1", timeout=15)
-    if r.status_code == 200 and r.json():
-        return r.json()[0]
+    r = supabase_get(f"/rest/v1/users?user_token=eq.{quote(token)}&select=*&limit=1", timeout=15)
+    if r.status_code == 200:
+        rows = r.json()
+        if rows:
+            return rows[0]
     return None
 
-
-def login_screen():
-    st.markdown(
-        """
-        <div class="hero">
-            <h1>UK Finance Job Tracker</h1>
-            <p>Private opportunity radar for graduate roles, boutique firms, job-board searches, and your application pipeline.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    c1, c2, c3 = st.columns([1.1, 1, 1.1])
-    with c2:
-        st.subheader("Log in")
-        token = st.text_input("Access token", type="password", placeholder="Paste your private user token")
-        if st.button("Enter dashboard", use_container_width=True):
-            user = authenticate(token)
-            if user:
-                st.session_state.user = user
-                st.rerun()
-            else:
-                st.error("Invalid token. Check your users table in Supabase.")
-
-
-if "user" not in st.session_state:
-    st.session_state.user = None
 
 if not require_config():
     st.stop()
 
+if "user" not in st.session_state:
+    st.session_state.user = None
+
 if st.session_state.user is None:
-    login_screen()
+    st.markdown(
+        """
+        <div class="hero">
+            <h1>UK Finance Job Tracker</h1>
+            <p>Enter your access token to log in.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    token = st.text_input("Token", type="password", key="login_token")
+    if st.button("Log in"):
+        user_obj = authenticate(token.strip())
+        if user_obj:
+            st.session_state.user = user_obj
+            st.rerun()
+        else:
+            st.error("Invalid token.")
     st.stop()
 
 user = st.session_state.user
@@ -356,41 +351,28 @@ USER_ID = user["id"]
 
 
 # -----------------------------
-# Data
+# Data fetch
 # -----------------------------
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_jobs(
-    user_id: int,
-    days: int = 14,
-    uk_only: bool = True,
-    category: str = "(all)",
-    ats_type: str = "(all)",
-    limit: int = 1000,
-):
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-
+def fetch_jobs(user_id: int, days=7, uk_only=True, category="(all)"):
+    """Fetch jobs with this user's applications LEFT JOINed."""
     params = [
         "select=*,applications(id,status,cv_variant,applied_at,notes,updated_at)",
         f"applications.user_id=eq.{user_id}",
         "order=first_seen_at.desc",
-        f"limit={limit}",
-        f"first_seen_at=gte.{quote(since)}",
+        "limit=5000",  # generous limit
     ]
-
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    params.append(f"first_seen_at=gte.{since}")
     if uk_only:
         params.append("is_uk=eq.true")
-
     if category and category != "(all)":
-        params.append(f"tags=cs.{{{quote(category)}}}")
+        params.append(f"tags=cs.{{{category}}}")
 
-    if ats_type and ats_type != "(all)":
-        params.append(f"ats_type=eq.{quote(ats_type)}")
-
-    r = supabase_get("/rest/v1/jobs?" + "&".join(params), timeout=40)
-
+    url_params = "&".join(params)
+    r = supabase_get(f"/rest/v1/jobs?{url_params}", timeout=40)
     if r.status_code != 200:
-        st.error(f"Supabase fetch failed: {r.status_code}")
-        st.code(r.text[:1000])
+        st.error(f"Fetch failed: {r.status_code}")
         return pd.DataFrame()
 
     rows = r.json()
@@ -427,15 +409,6 @@ def fetch_jobs(
     return df
 
 
-@st.cache_data(ttl=120, show_spinner=False)
-def fetch_user_stats(user_id: int):
-    # Minimal read of applications for pipeline stats
-    r = supabase_get(f"/rest/v1/applications?user_id=eq.{user_id}&select=status,cv_variant,applied_at,updated_at", timeout=20)
-    if r.status_code == 200:
-        return pd.DataFrame(r.json())
-    return pd.DataFrame()
-
-
 def save_application(user_id: int, job_id: int, status: str, cv_variant: str | None, notes: str | None):
     body = {
         "user_id": user_id,
@@ -464,11 +437,11 @@ def save_application(user_id: int, job_id: int, status: str, cv_variant: str | N
     return True
 
 
-def refresh_user():
-    # Re-read user preferences if updated in Supabase
-    token = user.get("user_token", "")
-    st.session_state.user = authenticate(token)
-    st.cache_data.clear()
+# -----------------------------
+# Page state
+# -----------------------------
+if "page" not in st.session_state:
+    st.session_state.page = "Overview"
 
 
 # -----------------------------
@@ -485,19 +458,35 @@ st.markdown(
 )
 
 with st.sidebar:
-    st.markdown("### Filters")
-
-    search_text = st.text_input("Search", placeholder="Company, role, keyword...")
-    days = st.selectbox("Seen within", [1, 3, 7, 14, 30, 60, 90], index=3)
-    uk_only = st.checkbox("UK only", value=True)
-
-    category = st.selectbox("Category", ["(all)"] + CATEGORIES)
-    status_filter = st.selectbox("Application status", ["(all)"] + STATUSES)
-
+    st.markdown("### Navigation")
+    
+    page = st.radio(
+        "Page",
+        ["Overview", "WM London (all firms)"],
+        index=["Overview", "WM London (all firms)"].index(st.session_state.page),
+        key="page_selector",
+        label_visibility="collapsed",
+    )
+    st.session_state.page = page
+    
     st.markdown("---")
-    st.markdown("### View")
-    card_limit = st.slider("Max cards shown", 10, 200, 60, step=10)
-
+    
+    if page == "Overview":
+        st.markdown("### Filters")
+        search_text = st.text_input("Search", placeholder="Company, role, keyword...")
+        days = st.selectbox("Seen within", [1, 3, 7, 14, 30, 60, 90], index=3)
+        uk_only = st.checkbox("UK only", value=True)
+        category = st.selectbox("Category", ["(all)"] + CATEGORIES)
+        status_filter = st.selectbox("Application status", ["(all)"] + STATUSES)
+        st.markdown("---")
+        st.markdown("### View")
+        card_limit = st.slider("Max cards shown", 10, 200, 60, step=10)
+    elif page == "WM London (all firms)":
+        st.markdown("### WM London Settings")
+        st.caption("Showing EVERY wealth management job in London, no limits.")
+        days_wm = st.selectbox("Posted within (days)", [7, 14, 30, 60, 90, 180], index=2)
+        status_filter_wm = st.selectbox("Status", ["(all)"] + STATUSES)
+    
     st.markdown("---")
     st.markdown(
         f"""
@@ -521,64 +510,292 @@ with st.sidebar:
         st.rerun()
 
 
-df = fetch_jobs(USER_ID, days=days, uk_only=uk_only, category=category)
+# =============================
+# PAGE: Overview
+# =============================
+if page == "Overview":
+    df = fetch_jobs(USER_ID, days=days, uk_only=uk_only, category=category)
 
-if not df.empty:
-    source_options = ["(all)"] + sorted([x for x in df["source_clean"].dropna().unique().tolist() if x])
-else:
-    source_options = ["(all)"]
+    if not df.empty:
+        source_options = ["(all)"] + sorted([x for x in df["source_clean"].dropna().unique().tolist() if x])
+    else:
+        source_options = ["(all)"]
 
-with st.sidebar:
-    source_filter = st.selectbox("Source / ATS", source_options)
+    with st.sidebar:
+        source_filter = st.selectbox("Source / ATS", source_options)
 
-if source_filter != "(all)" and not df.empty:
-    df = df[df["source_clean"] == source_filter]
+    if source_filter != "(all)" and not df.empty:
+        df = df[df["source_clean"] == source_filter]
 
-if status_filter != "(all)" and not df.empty:
-    df = df[df["status"] == status_filter]
+    if status_filter != "(all)" and not df.empty:
+        df = df[df["status"] == status_filter]
 
-if search_text.strip() and not df.empty:
-    q = search_text.strip().lower()
-    search_cols = ["company_clean", "title_clean", "location_clean", "description"]
-    mask = pd.Series(False, index=df.index)
-    for col in search_cols:
-        if col in df:
-            mask = mask | df[col].fillna("").str.lower().str.contains(q, na=False)
-    df = df[mask]
+    if search_text.strip() and not df.empty:
+        q = search_text.strip().lower()
+        search_cols = ["company_clean", "title_clean", "location_clean", "description"]
+        mask = pd.Series(False, index=df.index)
+        for col in search_cols:
+            if col in df:
+                mask = mask | df[col].fillna("").str.lower().str.contains(q, na=False)
+        df = df[mask]
+
+    # KPIs
+    if df.empty:
+        st.info("No jobs match the current filters. Try widening the date range or turning off UK-only.")
+        st.stop()
+
+    new_count = int((df["status"] == "new").sum())
+    saved_count = int((df["status"] == "saved").sum())
+    applied_count = int((df["status"] == "applied").sum())
+    interview_count = int(df["status"].isin(["oa", "hirevue", "final"]).sum())
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Visible jobs", f"{len(df):,}")
+    m2.metric("New", f"{new_count:,}")
+    m3.metric("Saved", f"{saved_count:,}")
+    m4.metric("Applied", f"{applied_count:,}")
+    m5.metric("Interview stage", f"{interview_count:,}")
+
+    tabs = st.tabs(["Opportunity feed", "Application pipeline", "Source analytics", "Table view"])
+
+    # Tab 0: Opportunity Feed
+    with tabs[0]:
+        st.markdown('<div class="section-title">Opportunity feed</div>', unsafe_allow_html=True)
+        st.caption("Use the card controls to save roles, choose the CV variant, and add notes.")
+
+        shown = df.head(card_limit).copy()
+
+        for _, row in shown.iterrows():
+            job_id = int(row["id"])
+            title = esc(row.get("title_clean"))
+            company = esc(row.get("company_clean"))
+            location = esc(row.get("location_clean"))
+            url = safe_text(row.get("url"), "")
+            source = esc(row.get("source_clean"))
+            status = safe_text(row.get("status"), "new")
+            seniority = esc(row.get("seniority") or "unknown")
+            seen = relative_time(row.get("first_seen_at"))
+            tags_html = category_pills(row.get("tags"))
+
+            link_html = f'<a href="{esc(url)}" target="_blank">{title}</a>' if url else title
+
+            st.markdown(
+                f"""
+                <div class="job-card">
+                    <div class="job-topline">
+                        <div>
+                            <div class="job-title">{link_html}</div>
+                            <div class="job-company">{company} · {location}</div>
+                        </div>
+                        <div>
+                            <span class="pill {status_class(status)}">{esc(STATUS_LABELS.get(status, status))}</span>
+                        </div>
+                    </div>
+                    <div style="margin-top: 8px;">
+                        {tags_html}
+                        <span class="pill pill-purple">{source}</span>
+                        <span class="pill pill-orange">{seniority}</span>
+                        <span class="pill pill-grey">Seen {esc(seen)}</span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            with st.expander("Update this role", expanded=False):
+                with st.form(f"job_form_{job_id}", clear_on_submit=False):
+                    c1, c2, c3 = st.columns([1, 1, 2])
+
+                    with c1:
+                        current_status = row.get("status") if row.get("status") in STATUSES else "new"
+                        new_status = st.selectbox(
+                            "Status",
+                            STATUSES,
+                            index=STATUSES.index(current_status),
+                            format_func=lambda s: STATUS_LABELS.get(s, s),
+                            key=f"status_{job_id}",
+                        )
+
+                    with c2:
+                        current_cv = row.get("cv_variant") if row.get("cv_variant") in CATEGORIES else "—"
+                        new_cv = st.selectbox(
+                            "CV variant",
+                            ["—"] + CATEGORIES,
+                            index=(["—"] + CATEGORIES).index(current_cv),
+                            key=f"cv_{job_id}",
+                        )
+
+                    with c3:
+                        notes = st.text_area(
+                            "Notes",
+                            value=safe_text(row.get("notes"), ""),
+                            height=92,
+                            placeholder="Deadline, application angle, recruiter name, next step...",
+                            key=f"notes_{job_id}",
+                        )
+
+                    c4, c5 = st.columns([1, 5])
+                    submitted = c4.form_submit_button("Save", use_container_width=True)
+                    if url:
+                        c5.markdown(f"[Open job posting]({url})")
+
+                    if submitted:
+                        ok = save_application(USER_ID, job_id, new_status, new_cv, notes)
+                        if ok:
+                            st.success("Saved.")
+                            st.rerun()
+
+        if len(df) > card_limit:
+            st.info(f"Showing {card_limit} of {len(df)} matching jobs. Increase 'Max cards shown' in the sidebar to see more.")
+
+    # Tab 1: Application Pipeline
+    with tabs[1]:
+        st.markdown('<div class="section-title">Application pipeline</div>', unsafe_allow_html=True)
+
+        pipeline_df = df[df["status"] != "new"].copy()
+        if pipeline_df.empty:
+            st.info("No saved/applied roles yet. Save roles from the Opportunity feed to build your pipeline.")
+        else:
+            status_counts = pipeline_df["status"].value_counts().reindex(STATUSES, fill_value=0)
+            st.bar_chart(status_counts)
+
+            for status in STATUSES:
+                chunk = pipeline_df[pipeline_df["status"] == status]
+                if chunk.empty:
+                    continue
+                with st.expander(f"{STATUS_LABELS.get(status, status)} · {len(chunk)}", expanded=status in ["saved", "applied", "oa", "hirevue", "final"]):
+                    table = chunk[["company_clean", "title_clean", "location_clean", "cv_variant", "applied_at", "notes", "url"]].rename(
+                        columns={
+                            "company_clean": "Company",
+                            "title_clean": "Role",
+                            "location_clean": "Location",
+                            "cv_variant": "CV",
+                            "applied_at": "Applied at",
+                            "notes": "Notes",
+                            "url": "URL",
+                        }
+                    )
+                    st.dataframe(table, use_container_width=True, hide_index=True)
+
+    # Tab 2: Source Analytics
+    with tabs[2]:
+        st.markdown('<div class="section-title">Source analytics</div>', unsafe_allow_html=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("Jobs by source")
+            source_counts = df["source_clean"].value_counts()
+            st.bar_chart(source_counts)
+
+        with c2:
+            st.subheader("Jobs by category")
+            tag_counts = {cat: int(df["tags"].apply(lambda tags: cat in (tags or [])).sum()) for cat in CATEGORIES}
+            st.bar_chart(pd.Series(tag_counts))
+
+        st.subheader("Companies appearing most often")
+        company_counts = df["company_clean"].value_counts().head(20)
+        st.dataframe(
+            company_counts.rename("Jobs").reset_index().rename(columns={"index": "Company", "company_clean": "Company"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # Tab 3: Table View
+    with tabs[3]:
+        st.markdown('<div class="section-title">Clean table view</div>', unsafe_allow_html=True)
+
+        table_cols = [
+            "company_clean",
+            "title_clean",
+            "location_clean",
+            "status",
+            "cv_variant",
+            "source_clean",
+            "seniority",
+            "first_seen_at",
+            "url",
+        ]
+
+        available_cols = [c for c in table_cols if c in df.columns]
+        table = df[available_cols].rename(
+            columns={
+                "company_clean": "Company",
+                "title_clean": "Role",
+                "location_clean": "Location",
+                "status": "Status",
+                "cv_variant": "CV",
+                "source_clean": "Source",
+                "seniority": "Seniority",
+                "first_seen_at": "First seen",
+                "url": "URL",
+            }
+        )
+
+        st.dataframe(table, use_container_width=True, hide_index=True)
+
+        csv = table.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Download current view as CSV",
+            data=csv,
+            file_name="job_tracker_view.csv",
+            mime="text/csv",
+            use_container_width=False,
+        )
 
 
-# -----------------------------
-# Dashboard KPIs
-# -----------------------------
-if df.empty:
-    st.info("No jobs match the current filters. Try widening the date range or turning off UK-only.")
-    st.stop()
+# =============================
+# PAGE: WM London (all firms)
+# =============================
+elif page == "WM London (all firms)":
+    st.markdown('<div class="section-title">🏦 Wealth Management — London (Every Firm)</div>', unsafe_allow_html=True)
+    st.caption("Showing EVERY wealth management job in London, sorted by newest first. No firm size filters, no limits.")
 
-new_count = int((df["status"] == "new").sum())
-saved_count = int((df["status"] == "saved").sum())
-applied_count = int((df["status"] == "applied").sum())
-interview_count = int(df["status"].isin(["oa", "hirevue", "final"]).sum())
+    # Fetch WM jobs in London with generous time window
+    df_wm = fetch_jobs(USER_ID, days=days_wm, uk_only=False, category="WM")  # uk_only=False, we filter manually
+    
+    if df_wm.empty:
+        st.info("No WM jobs found in the database. The poller may not have run yet, or no WM-tagged jobs exist.")
+        st.stop()
 
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Visible jobs", f"{len(df):,}")
-m2.metric("New", f"{new_count:,}")
-m3.metric("Saved", f"{saved_count:,}")
-m4.metric("Applied", f"{applied_count:,}")
-m5.metric("Interview stage", f"{interview_count:,}")
+    # Filter to London specifically
+    london_keywords = ["london", "city of london", "canary wharf", "mayfair", "ec1", "ec2", "ec3", "ec4", "e14", "w1", "wc1", "wc2"]
+    df_wm["is_london"] = df_wm["location_clean"].fillna("").str.lower().apply(
+        lambda loc: any(kw in loc for kw in london_keywords)
+    )
+    df_wm = df_wm[df_wm["is_london"]].copy()
 
-tabs = st.tabs(["Opportunity feed", "Application pipeline", "Source analytics", "Table view"])
+    if df_wm.empty:
+        st.info("No WM jobs found in London. Try expanding the date range in the sidebar.")
+        st.stop()
 
+    # Apply status filter if not "(all)"
+    if status_filter_wm != "(all)":
+        df_wm = df_wm[df_wm["status"] == status_filter_wm]
 
-# -----------------------------
-# Opportunity Feed
-# -----------------------------
-with tabs[0]:
-    st.markdown('<div class="section-title">Opportunity feed</div>', unsafe_allow_html=True)
-    st.caption("Use the card controls to save roles, choose the CV variant, and add notes.")
+    if df_wm.empty:
+        st.info(f"No WM jobs in London with status '{status_filter_wm}'.")
+        st.stop()
 
-    shown = df.head(card_limit).copy()
+    # Sort by newest first
+    df_wm = df_wm.sort_values("first_seen_dt", ascending=False)
 
-    for _, row in shown.iterrows():
+    # Summary stats
+    st.markdown(f"**{len(df_wm)} wealth management jobs in London** (last {days_wm} days)")
+    
+    new_wm = int((df_wm["status"] == "new").sum())
+    saved_wm = int((df_wm["status"] == "saved").sum())
+    applied_wm = int((df_wm["status"] == "applied").sum())
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total", len(df_wm))
+    c2.metric("New", new_wm)
+    c3.metric("Saved", saved_wm)
+    c4.metric("Applied", applied_wm)
+
+    st.markdown("---")
+
+    # Render every single job as a card
+    for _, row in df_wm.iterrows():
         job_id = int(row["id"])
         title = esc(row.get("title_clean"))
         company = esc(row.get("company_clean"))
@@ -616,7 +833,7 @@ with tabs[0]:
         )
 
         with st.expander("Update this role", expanded=False):
-            with st.form(f"job_form_{job_id}", clear_on_submit=False):
+            with st.form(f"job_form_wm_{job_id}", clear_on_submit=False):
                 c1, c2, c3 = st.columns([1, 1, 2])
 
                 with c1:
@@ -626,7 +843,7 @@ with tabs[0]:
                         STATUSES,
                         index=STATUSES.index(current_status),
                         format_func=lambda s: STATUS_LABELS.get(s, s),
-                        key=f"status_{job_id}",
+                        key=f"status_wm_{job_id}",
                     )
 
                 with c2:
@@ -635,7 +852,7 @@ with tabs[0]:
                         "CV variant",
                         ["—"] + CATEGORIES,
                         index=(["—"] + CATEGORIES).index(current_cv),
-                        key=f"cv_{job_id}",
+                        key=f"cv_wm_{job_id}",
                     )
 
                 with c3:
@@ -644,7 +861,7 @@ with tabs[0]:
                         value=safe_text(row.get("notes"), ""),
                         height=92,
                         placeholder="Deadline, application angle, recruiter name, next step...",
-                        key=f"notes_{job_id}",
+                        key=f"notes_wm_{job_id}",
                     )
 
                 c4, c5 = st.columns([1, 5])
@@ -657,109 +874,3 @@ with tabs[0]:
                     if ok:
                         st.success("Saved.")
                         st.rerun()
-
-    if len(df) > card_limit:
-        st.info(f"Showing {card_limit} of {len(df)} matching jobs. Increase 'Max cards shown' in the sidebar to see more.")
-
-
-# -----------------------------
-# Application Pipeline
-# -----------------------------
-with tabs[1]:
-    st.markdown('<div class="section-title">Application pipeline</div>', unsafe_allow_html=True)
-
-    pipeline_df = df[df["status"] != "new"].copy()
-    if pipeline_df.empty:
-        st.info("No saved/applied roles yet. Save roles from the Opportunity feed to build your pipeline.")
-    else:
-        status_counts = pipeline_df["status"].value_counts().reindex(STATUSES, fill_value=0)
-        st.bar_chart(status_counts)
-
-        for status in STATUSES:
-            chunk = pipeline_df[pipeline_df["status"] == status]
-            if chunk.empty:
-                continue
-            with st.expander(f"{STATUS_LABELS.get(status, status)} · {len(chunk)}", expanded=status in ["saved", "applied", "oa", "hirevue", "final"]):
-                table = chunk[["company_clean", "title_clean", "location_clean", "cv_variant", "applied_at", "notes", "url"]].rename(
-                    columns={
-                        "company_clean": "Company",
-                        "title_clean": "Role",
-                        "location_clean": "Location",
-                        "cv_variant": "CV",
-                        "applied_at": "Applied at",
-                        "notes": "Notes",
-                        "url": "URL",
-                    }
-                )
-                st.dataframe(table, use_container_width=True, hide_index=True)
-
-
-# -----------------------------
-# Source Analytics
-# -----------------------------
-with tabs[2]:
-    st.markdown('<div class="section-title">Source analytics</div>', unsafe_allow_html=True)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Jobs by source")
-        source_counts = df["source_clean"].value_counts()
-        st.bar_chart(source_counts)
-
-    with c2:
-        st.subheader("Jobs by category")
-        tag_counts = {cat: int(df["tags"].apply(lambda tags: cat in (tags or [])).sum()) for cat in CATEGORIES}
-        st.bar_chart(pd.Series(tag_counts))
-
-    st.subheader("Companies appearing most often")
-    company_counts = df["company_clean"].value_counts().head(20)
-    st.dataframe(
-        company_counts.rename("Jobs").reset_index().rename(columns={"index": "Company", "company_clean": "Company"}),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-# -----------------------------
-# Table View
-# -----------------------------
-with tabs[3]:
-    st.markdown('<div class="section-title">Clean table view</div>', unsafe_allow_html=True)
-
-    table_cols = [
-        "company_clean",
-        "title_clean",
-        "location_clean",
-        "status",
-        "cv_variant",
-        "source_clean",
-        "seniority",
-        "first_seen_at",
-        "url",
-    ]
-
-    available_cols = [c for c in table_cols if c in df.columns]
-    table = df[available_cols].rename(
-        columns={
-            "company_clean": "Company",
-            "title_clean": "Role",
-            "location_clean": "Location",
-            "status": "Status",
-            "cv_variant": "CV",
-            "source_clean": "Source",
-            "seniority": "Seniority",
-            "first_seen_at": "First seen",
-            "url": "URL",
-        }
-    )
-
-    st.dataframe(table, use_container_width=True, hide_index=True)
-
-    csv = table.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download current view as CSV",
-        data=csv,
-        file_name="job_tracker_view.csv",
-        mime="text/csv",
-        use_container_width=False,
-    )
